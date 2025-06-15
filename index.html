@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>Cyberpunk Beat - MP3音ゲー</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@700&display=swap');
+    body {
+      background: radial-gradient(ellipse at center, #131a29 0%, #090a14 100%);
+      color: #0fffc0;
+      font-family: 'Orbitron', 'Segoe UI', monospace;
+      margin: 0; padding: 0;
+      overflow: hidden;
+      user-select: none;
+    }
+    .topbar {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 8px 24px;
+      background: rgba(18,34,46,0.85);
+      box-shadow: 0 2px 12px #09fff4aa;
+      font-size: 1.3em;
+    }
+    .btn {
+      background: linear-gradient(90deg, #0fffc0 20%, #7b40ff 80%);
+      color: #090a14; border: none; border-radius: 14px;
+      font-family: inherit; font-weight: bold; font-size: 1em;
+      padding: 7px 16px; cursor: pointer; box-shadow: 0 0 6px #7b40ff80;
+      transition: 0.15s;
+    }
+    .btn:hover { filter: brightness(1.15); }
+    .uploader {
+      display: flex; flex-direction: column; align-items: center; gap: 1em; margin-top: 2em;
+    }
+    .keyset {
+      margin: 12px 0 0 0; display: flex; gap: 1em; align-items: center; justify-content: center;
+      font-size: 1em;
+    }
+    .keyinput {
+      width: 30px; text-align: center; background: #191c29; color: #0fffc0; border: 1px solid #0fffc0; border-radius: 6px;
+      font-family: inherit; font-size: 1em; margin-left: 3px;
+    }
+    canvas {
+      display: block; margin: 18px auto 0 auto; background: linear-gradient(180deg, #222c44 0%, #12121a 100%);
+      border-radius: 20px; box-shadow: 0 0 30px #0fffc066;
+      border: 2.5px solid #0fffc044;
+      transition: box-shadow 0.2s;
+    }
+    .scorebar {
+      font-size: 1.2em; margin-top: 12px; text-align: center;
+      text-shadow: 0 0 8px #0fffc0;
+    }
+    .cyber-glow {
+      text-shadow:
+        0 0 6px #0fffc0cc,
+        0 0 15px #7b40ff99,
+        0 0 25px #7b40ff44;
+      letter-spacing: 0.1em;
+      font-size: 2.2em;
+      font-family: 'Orbitron', 'Segoe UI', monospace;
+      background: linear-gradient(90deg, #0fffc0 30%, #7b40ff 70%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    @media (max-width:700px) {
+      canvas { width: 99vw !important; height: 55vw !important; }
+    }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <span class="cyber-glow">CYBERPUNK BEAT</span>
+    <button class="btn" onclick="location.reload()">Restart</button>
+  </div>
+  <div class="uploader" id="uploader">
+    <input type="file" id="mp3input" accept=".mp3,audio/*">
+    <div>
+      <span>8キー割り当て:</span>
+      <span id="keyset"></span>
+      <button class="btn" onclick="showKeyEdit()">編集</button>
+    </div>
+    <div style="color:#0fffc077;font-size:0.98em;">MP3を選ぶと自動で始まります</div>
+  </div>
+  <div id="game" style="display:none;">
+    <div class="scorebar" id="scorebar">SCORE 0 | COMBO 0 | MAX 0 | MISS 0</div>
+    <canvas id="gameCanvas" width="760" height="400"></canvas>
+    <div class="scorebar" id="judgelabel" style="font-size:1.8em;margin-top:7px;"></div>
+    <button class="btn" onclick="location.reload()">別の曲で遊ぶ</button>
+  </div>
+  <script>
+    // ---------------- 基本設定 ----------------
+    let keyDefaults = ['D','F','G','H','J','K','L',';'];
+    let keyCustom = JSON.parse(localStorage.getItem('cyberbeat_keyset')||'null') || keyDefaults.slice();
+    function updateKeysetLabel() {
+      document.getElementById('keyset').innerHTML = keyCustom.map(k=>`<span style="color:#0ff;">${k}</span>`).join(' ');
+    }
+    function showKeyEdit() {
+      let html = keyCustom.map((k,i)=>`<input class="keyinput" id="keyinp${i}" value="${k}" maxlength="1">`).join(' ');
+      let btns = `<button class="btn" onclick="saveKeyEdit()">保存</button> <button class="btn" onclick="cancelKeyEdit()">キャンセル</button>`;
+      document.getElementById('keyset').innerHTML = html+" "+btns;
+    }
+    function saveKeyEdit() {
+      keyCustom = [];
+      for(let i=0;i<8;i++) keyCustom.push(document.getElementById('keyinp'+i).value.toUpperCase()||keyDefaults[i]);
+      localStorage.setItem('cyberbeat_keyset',JSON.stringify(keyCustom));
+      updateKeysetLabel();
+    }
+    function cancelKeyEdit(){updateKeysetLabel();}
+    updateKeysetLabel();
+    // ---------------- ゲームロジック ----------------
+    let audioCtx, source, analyser, mp3Buf, mp3Duration=60, bpm=120, songStart=0, songTitle='No Title';
+    let notes=[], hit=[], combo=0, maxCombo=0, score=0, miss=0, started=false, ended=false;
+    let canvas=document.getElementById('gameCanvas'), ctx=canvas.getContext('2d');
+    let noteSpeed=230; // px/sec
+    let laneCount=8, laneW=canvas.width/laneCount, lanePad=7;
+    let judgeWindow={perfect:0.11,great:0.19,good:0.29}; // 秒
+    let judgeLabel=document.getElementById('judgelabel');
+    let scorebar=document.getElementById('scorebar');
+    // -------- MP3読込＋BPM推定・ノーツ生成 --------
+    document.getElementById('mp3input').addEventListener('change',async function(e){
+      let file = e.target.files[0];
+      if(!file) return;
+      document.getElementById('uploader').style.display='none';
+      document.getElementById('game').style.display='block';
+      songTitle = file.name.replace(/\.[^/.]+$/, "");
+      let abuf = await file.arrayBuffer();
+      audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+      mp3Buf = await audioCtx.decodeAudioData(abuf);
+      mp3Duration = mp3Buf.duration;
+      // BPM推定（簡易）＋ノーツ自動生成
+      bpm = await estimateBPM(mp3Buf); // 超簡易推定
+      notes = autoGenerateNotes(mp3Buf, bpm, mp3Duration, laneCount);
+      hit = Array(notes.length).fill(false);
+      startGame();
+    });
+    // ---- BPM推定（めっちゃ雑）----
+    async function estimateBPM(audioBuffer){
+      // 音量ピークから平均間隔で算出（短い曲には不向き、誤差多し）
+      let data = audioBuffer.getChannelData(0);
+      let len = data.length, step = Math.floor(audioBuffer.sampleRate*0.01);
+      let peaks=[], last=-1;
+      for(let i=0;i<len;i+=step){
+        if(Math.abs(data[i])>0.40 && i-last>audioBuffer.sampleRate*0.2){
+          peaks.push(i/audioBuffer.sampleRate);
+          last=i;
+        }
+      }
+      let intervals=[];
+      for(let i=1;i<peaks.length;i++) intervals.push(peaks[i]-peaks[i-1]);
+      let avg = intervals.reduce((a,b)=>a+b,0)/intervals.length||0.5;
+      let estbpm = Math.round(60/avg)||120;
+      return Math.min(200,Math.max(60,estbpm));
+    }
+    // ---- ノーツ自動生成 ----
+    function autoGenerateNotes(audioBuffer, bpm, duration, laneCount){
+      // BPM通りの等間隔で1小節2ノーツずつ8レーンに割振り
+      let interval = 60/bpm/2; // 2ノーツ/拍
+      let notes = [];
+      let t=2.2; // 曲頭余白2.2秒
+      let idx=0;
+      while(t<duration-0.2){
+        notes.push({time:t, lane:idx%laneCount, judged:false});
+        t+=interval;
+        idx++;
+      }
+      return notes;
+    }
+    // --------- ゲーム開始・音再生 ---------
+    function startGame(){
+      // 音再生
+      source = audioCtx.createBufferSource();
+      source.buffer = mp3Buf;
+      source.connect(audioCtx.destination);
+      source.start(0);
+      songStart = audioCtx.currentTime;
+      started=true;
+      ended=false;
+      requestAnimationFrame(gameLoop);
+    }
+    // --------- キー入力 ---------
+    let keymap = {}; keyCustom.forEach((k,i)=>keymap[k]=i);
+    window.addEventListener('keydown',e=>{
+      if(!started||ended) return;
+      let k = e.key.toUpperCase();
+      let lane = keyCustom.indexOf(k);
+      if(lane<0) return;
+      let now = audioCtx.currentTime-songStart;
+      // 最も近い未ヒットノーツを探す
+      let hitIdx = -1, hitJg = 'miss', hitDelta=999;
+      for(let i=0;i<notes.length;i++){
+        if(hit[i]) continue;
+        let dt = Math.abs(notes[i].time-now);
+        if(notes[i].lane==lane && dt<judgeWindow.good && Math.abs(dt)<hitDelta){
+          hitIdx = i; hitDelta=Math.abs(dt);
+        }
+      }
+      if(hitIdx<0) { // ミス
+        showJudge('MISS','#ff0080');
+        combo=0; miss++; updateScore();
+        return;
+      }
+      let dt = Math.abs(notes[hitIdx].time-now);
+      if(dt<judgeWindow.perfect) { score+=1200; showJudge('PERFECT','#0fffc0'); combo++; }
+      else if(dt<judgeWindow.great) { score+=600; showJudge('GREAT','#7b40ff'); combo++; }
+      else { score+=250; showJudge('GOOD','#fff'); combo++; }
+      hit[hitIdx]=true;
+      maxCombo=Math.max(combo,maxCombo);
+      updateScore();
+    });
+    function showJudge(txt,col){judgeLabel.innerHTML=`<span style="color:${col}">${txt}</span>`; setTimeout(()=>{judgeLabel.innerHTML='';},430);}
+    function updateScore(){
+      scorebar.innerHTML = `SCORE ${score} | COMBO ${combo} | MAX ${maxCombo} | MISS ${miss}`;
+    }
+    // --------- メインゲームループ(Canvas) ---------
+    function gameLoop(){
+      if(!started) return;
+      let now = audioCtx.currentTime-songStart;
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      // 背景グリッド
+      ctx.save();
+      for(let l=0;l<laneCount;l++){
+        ctx.fillStyle = l%2==0 ? '#282e47cc' : '#181c23bb';
+        ctx.fillRect(l*laneW+lanePad,0,laneW-lanePad*2,canvas.height);
+      }
+      // レーン区切り
+      for(let l=1;l<laneCount;l++){
+        ctx.strokeStyle='#0fffc044';
+        ctx.lineWidth=2;
+        ctx.beginPath(); ctx.moveTo(l*laneW,0); ctx.lineTo(l*laneW,canvas.height); ctx.stroke();
+      }
+      ctx.restore();
+      // ノーツ
+      let hitLineY = canvas.height-60;
+      for(let i=0;i<notes.length;i++){
+        let note = notes[i];
+        if(hit[i]) continue;
+        let d = note.time-now; // 残り秒数
+        let y = hitLineY - d*noteSpeed;
+        if(y>canvas.height+40) continue; // 下に消えた
+        if(y<hitLineY-330) continue; // 画面上部
+        // ミス判定
+        if(!hit[i] && d<-judgeWindow.good){
+          hit[i]=true; miss++; combo=0; updateScore();
+          showJudge('MISS','#ff0080');
+          continue;
+        }
+        // ノーツ描画
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(note.lane*laneW+laneW/2, y, 21, 0, 2 * Math.PI);
+        ctx.shadowColor = "#0fffc0";
+        ctx.shadowBlur = 15;
+        ctx.fillStyle = "#7b40ffcc";
+        ctx.fill();
+        ctx.restore();
+        // フレーム
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(note.lane*laneW+laneW/2, y, 21, 0, 2 * Math.PI);
+        ctx.lineWidth=2.5;
+        ctx.strokeStyle="#0fffc0cc";
+        ctx.shadowColor = "#0fffc0";
+        ctx.shadowBlur = 12;
+        ctx.stroke();
+        ctx.restore();
+      }
+      // 判定ライン
+      ctx.save();
+      ctx.globalAlpha=0.7;
+      ctx.fillStyle="#0fffc044";
+      ctx.fillRect(0,hitLineY-5,canvas.width,10);
+      ctx.restore();
+      // キー表示
+      for(let l=0;l<laneCount;l++){
+        ctx.save();
+        ctx.font="bold 1.4em Orbitron";
+        ctx.textAlign="center"; ctx.textBaseline="middle";
+        ctx.shadowColor="#7b40ff"; ctx.shadowBlur=10;
+        ctx.fillStyle="#0fffc0";
+        ctx.fillText(keyCustom[l], l*laneW+laneW/2, hitLineY+36);
+        ctx.restore();
+      }
+      // 終了判定
+      if(now>mp3Duration+0.3){
+        ended=true; started=false;
+        showJudge('Finish!',"#0fffc0");
+      } else {
+        requestAnimationFrame(gameLoop);
+      }
+    }
+  </script>
+</body>
+</html>
