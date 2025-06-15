@@ -1,0 +1,32 @@
+function autoGenerateNotes(audioBuffer, bpm, duration, laneCount) {
+  const data = audioBuffer.getChannelData(0);
+  const sampleRate = audioBuffer.sampleRate;
+  const windowSize = Math.floor(sampleRate * 0.022); // 22ms
+  let notes = [];
+  let last = Array(laneCount).fill(-9999); // 各レーンごと前回ノーツ
+  let minInterval = [0.17,0.13,0.13,0.10,0.10,0.13,0.13,0.17];
+  for (let i = 0; i < data.length - windowSize; i += windowSize) {
+    let sum = [0,0,0]; // low/mid/high
+    for (let j = 0; j < windowSize; j++) {
+      let t = Math.abs(data[i + j]);
+      let f = j / windowSize * sampleRate / 2;
+      if (f < 180) sum[0] += t;
+      else if (f < 1400) sum[1] += t;
+      else sum[2] += t;
+    }
+    let tsec = i / sampleRate;
+    // キック/スネア/ハット系をレーン分散
+    if (sum[0] > 1.6 && tsec - last[2] > minInterval[2]) { notes.push({ time: tsec, lane: 2 }); last[2] = tsec; }
+    if (sum[1] > 1.08 && tsec - last[5] > minInterval[5]) { notes.push({ time: tsec, lane: 5 }); last[5] = tsec; }
+    if (sum[2] > 0.7 && tsec - last[0] > minInterval[0]) { notes.push({ time: tsec, lane: 0 }); last[0] = tsec; }
+    // たまに同時押し
+    if (sum[2] > 0.92 && sum[1] > 1.13 && tsec - last[7] > minInterval[7]) {
+      notes.push({ time: tsec, lane: 7 }); last[7] = tsec;
+    }
+  }
+  // ノーツのダブり排除、単調防止にたまにランダムで端レーンへ
+  notes = notes.filter((v, i, a) => i === 0 || v.time - a[i - 1].time > 0.06);
+  notes.forEach((n,i) => { if (Math.random() < 0.11) n.lane = Math.floor(Math.random()*laneCount); });
+  notes.sort((a,b)=>a.time-b.time);
+  return notes.map(n=>({...n, judged:false}));
+}
